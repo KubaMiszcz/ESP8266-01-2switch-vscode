@@ -1,0 +1,267 @@
+// /*
+// It connects to an MQTT server then:
+// - on 0 switches off relay
+// - on 1 switches on relay
+// - on 2 toggles the state of the relay
+
+// - sends 0 on off relay
+// - sends 1 on on relay
+
+// It will reconnect to the server if the connection is lost using a blocking
+// reconnect function. See the 'mqtt_reconnect_nonblocking' example for how to
+// achieve the same result without blocking the main loop.
+
+// The current state is stored in EEPROM and restored on bootup
+// */
+
+#include <ESP8266WiFi.h>
+// #include <PubSubClient.h>
+#include "../lib/PubSubClient-2.6.0/src/PubSubClient.h"
+// #include <Bounce2.h>
+#include "../lib/Bounce2-2.41.0/Bounce2.h"
+#include <EEPROM.h>
+
+#define espDeviceName "Esp01"
+#define espMqttClientName "Esp01MqttClient"
+const char *outTopic = "/myhome/Esp01/state1";
+const char *inTopic = "/myhome/Esp01/command1";
+const char *debugTopic = "/myhome/Esp01/debug";
+
+const char *ssid = "grycownia";
+const char *password = "ulaslodziuchnaaa";
+const char *mqtt_server = "192.168.0.201";
+const uint16_t mqtt_port = 1883;
+const char *mqtt_user = "openHabEspNo1";
+const char *mqtt_pwd = "habopen";
+
+WiFiClient espWifiClient;
+PubSubClient espMqttClient(espWifiClient);
+long lastMsg = 0;
+char msg[50];
+char info_msg[50];
+int value = 0;
+
+int button1_pin = 0;
+// int button2_pin = 0;
+int relay1_pin = 2;
+// int relay2_pin = 2;
+int esp12_internal_LED = 13;
+bool relay1State = LOW;
+// bool relay2State = LOW;
+
+// Instantiate a Bounce object :
+Bounce debouncer1 = Bounce();
+
+void externalButton();
+void setup_wifi();
+void callback(char *topic, byte *payload, unsigned int length);
+void reconnect();
+void heartbeat(uint16_t delay);
+
+void setup()
+{
+    EEPROM.begin(512);           // Begin eeprom to store on/off state
+    pinMode(relay1_pin, OUTPUT); // Initialize the relay pin as an output
+    pinMode(button1_pin, INPUT); // Initialize the relay pin as an output
+    pinMode(esp12_internal_LED, OUTPUT);
+    relay1State = EEPROM.read(0);
+    digitalWrite(relay1_pin, relay1State);
+
+    debouncer1.attach(button1_pin); // Use the bounce2 library to debounce the built in button
+    debouncer1.interval(100);       // Input must be low for 50 ms
+
+    digitalWrite(esp12_internal_LED, LOW); // Blink to indicate setup
+    delay(500);
+    digitalWrite(esp12_internal_LED, HIGH);
+    delay(500);
+
+    Serial.begin(115200);
+    setup_wifi(); // Connect to wifi
+    espMqttClient.setServer(mqtt_server, 1883);
+    espMqttClient.setCallback(callback);
+}
+
+void loop()
+{
+    delay(50);
+    if (!espMqttClient.connected())
+    {
+        reconnect();
+    }
+    espMqttClient.loop();
+    externalButton();
+    heartbeat(10000);
+}
+
+//=================================================================================================================================
+
+void heartbeat(uint16_t delay = 10000)
+{
+    long now = millis();
+    if (now - lastMsg > delay)
+    {
+        lastMsg = now;
+        espMqttClient.publish(outTopic, "heartbeat");
+        Serial.print("o");
+    }
+}
+
+void setup_wifi()
+{
+    delay(100);
+    // We start by connecting to a WiFi network
+    Serial.println();
+    Serial.print("Connecting to ");
+    Serial.println(ssid);
+
+    WiFi.begin(ssid, password);
+
+    while (WiFi.status() != WL_CONNECTED)
+    {
+        externalButton();
+        for (int i = 0; i < 500; i++)
+        {
+            externalButton();
+            delay(1);
+        }
+        Serial.print(".");
+    }
+    digitalWrite(esp12_internal_LED, LOW);
+    delay(500);
+    digitalWrite(esp12_internal_LED, HIGH);
+    delay(500);
+    digitalWrite(esp12_internal_LED, LOW);
+    delay(500);
+    digitalWrite(esp12_internal_LED, HIGH);
+    Serial.println("");
+    Serial.println("WiFi connected");
+    Serial.println("IP address: ");
+    Serial.println(WiFi.localIP());
+}
+
+void callback(char *topic, byte *payload, unsigned int length)
+{
+    Serial.print("\nMessage arrived [");
+    Serial.print(topic);
+    Serial.print("] ");
+    for (int i = 0; i < length; i++)
+    {
+        Serial.print((char)payload[i]);
+    }
+    Serial.println();
+
+    // Switch on the LED if an 1 was received as first character
+    if ((char)payload[0] == '0')
+    {
+        digitalWrite(relay1_pin, LOW); // Turn the LED on (Note that LOW is the voltage level
+        Serial.println("relay1_pin -> LOW");
+        relay1State = LOW;
+        EEPROM.write(0, relay1State); // Write state to EEPROM
+        EEPROM.commit();
+        espMqttClient.publish(outTopic, "0");
+    }
+    else if ((char)payload[0] == '1')
+    {
+        digitalWrite(relay1_pin, HIGH); // Turn the LED off by making the voltage HIGH
+        Serial.println("relay1_pin -> HIGH");
+        relay1State = HIGH;
+        EEPROM.write(0, relay1State); // Write state to EEPROM
+        EEPROM.commit();
+        espMqttClient.publish(outTopic, "1");
+    }
+    //else if ((char)payload[0] == '2') {
+    //	relay1State = !relay1State;
+    //	digitalWrite(relay1_pin, relay1State);  // Turn the LED off by making the voltage HIGH
+    //	Serial.print("relay1_pin -> switched to ");
+    //	Serial.println(relay1State);
+    //	EEPROM.write(0, relay1State);    // Write state to EEPROM
+    //	EEPROM.commit();
+    //	client.publish(outTopic, relay1State ? "1" : "0");
+    //}
+    else if ((char)payload[0] == '?')
+    {
+        // digitalWrite(relay1_pin, relay1State); // Turn the LED off by making the voltage HIGH
+        Serial.print("relay1_pin current state -> ");
+        Serial.println(relay1State);
+        espMqttClient.publish(outTopic, "current state:");
+        espMqttClient.publish(outTopic, relay1State ? "1" : "0");
+    }
+}
+
+void reconnect()
+{
+    // Loop until we're reconnected
+    while (!espMqttClient.connected())
+    {
+        Serial.print("Attempting MQTT connection...");
+        // Attempt to connect
+        // if (espMqttClient.connect("Esp01Client"))
+        // sprintf(clientName, "%sClient", deviceName);
+        if (espMqttClient.connect(espMqttClientName))
+        {
+            Serial.println("connected");
+            // Once connected, publish an announcement...
+            sprintf(info_msg, "%s booted succesfully", espDeviceName);
+            // espMqttClient.publish(outTopic,  "Esp01 booted succesfully");
+            espMqttClient.publish(outTopic, info_msg);
+            // ... and resubscribe
+            espMqttClient.subscribe(inTopic);
+        }
+        else
+        {
+            Serial.print("failed, rc=");
+            Serial.print(espMqttClient.state());
+            Serial.println(" try again in 5 seconds");
+            // Wait 5 seconds before retrying
+            for (int i = 0; i < 5000; i++)
+            {
+                externalButton();
+                delay(1);
+            }
+        }
+    }
+}
+
+void externalButton()
+{
+    debouncer1.update();
+    // Call code if Bounce fell (transition from HIGH to LOW) :
+    if (debouncer1.fell())
+    {
+        Serial.println("debouncer1 fell");
+        // Toggle relay state :
+        relay1State = !relay1State;
+        digitalWrite(relay1_pin, relay1State);
+        EEPROM.write(0, relay1State); // Write state to EEPROM
+        if (relay1State == 1)
+        {
+            espMqttClient.publish(outTopic, "1");
+        }
+        else if (relay1State == 0)
+        {
+            espMqttClient.publish(outTopic, "0");
+        }
+    }
+}
+
+void externalButton(Bounce debouncer, bool relayState, int relayPin)
+{
+    debouncer.update();
+    // Call code if Bounce fell (transition from HIGH to LOW) :
+    if (debouncer.fell())
+    {
+        Serial.println("debouncer1 fell");
+        // Toggle relay state :
+        relayState = !relayState;
+        digitalWrite(relayPin, relayState);
+        EEPROM.write(0, relayState); // Write state to EEPROM
+        if (relayState == 1)
+        {
+            espMqttClient.publish(outTopic, "1");
+        }
+        else if (relayState == 0)
+        {
+            espMqttClient.publish(outTopic, "0");
+        }
+    }
+}
